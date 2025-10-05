@@ -1,0 +1,1891 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <title>Duik-loop – realistische rotsen, bodem, lamp & namen</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html,body { margin:0; height:100%; background:#000; overflow:hidden; }
+    #hud {
+      position:fixed; left:12px; top:12px; z-index:10;
+      font:12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu;
+      color:#cfe9ff; background:rgba(33, 7, 92, 0.671); padding:8px 10px; border-radius:8px;
+      display:none; /* zet op block tijdens testen */
+    }
+    a { color:#9fd; }
+    #startAudioBtn{
+      position:fixed; right:12px; bottom:12px; z-index:15;
+      padding:10px 14px; border-radius:10px; border:0; cursor:pointer;
+      background:#0b2a35; color:#dff7ff; box-shadow:0 6px 18px rgba(0,0,0,.35);
+    }
+    #sharkControls{
+      position:fixed; left:12px; bottom:12px; z-index:15;
+      display:flex; flex-direction:column; gap:6px; align-items:flex-start;
+    }
+    #sharkChargeLabel{
+      font:700 12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu;
+      text-transform:uppercase;
+      letter-spacing:0.08em;
+      color:#ffd9d9;
+    }
+    #sharkControlsRow{
+      display:flex; align-items:center; gap:10px;
+    }
+    #sharkChargeWrap{
+      position:relative; width:190px; height:20px;
+      border-radius:12px; background:rgba(12,26,34,0.8); border:1px solid rgba(94,206,255,0.4);
+      overflow:hidden;
+    }
+    #sharkChargeBar{
+      height:100%; width:0%; background:linear-gradient(90deg,#1fb6ff,#74f7ff);
+      transition:width 0.25s ease, background 0.25s ease;
+    }
+    #spawnSharkBtn{
+      position:relative; left:auto; bottom:auto; z-index:auto;
+      padding:10px 14px; border-radius:10px; border:0; cursor:pointer;
+      background:#31090f; color:#ffd9d9; box-shadow:0 6px 18px rgba(0,0,0,.35);
+      white-space:nowrap;
+    }
+    #fadeOverlay{
+      position:fixed; inset:0; z-index:25; background:#000; pointer-events:none;
+      opacity:0; transition:opacity 0.8s ease;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+        "troika-three-text": "https://unpkg.com/troika-three-text@0.47.2/dist/troika-three-text.esm.js",
+        "troika-worker-utils": "https://unpkg.com/troika-worker-utils@0.47.2/dist/troika-worker-utils.esm.js",
+        "webgl-sdf-generator": "https://unpkg.com/webgl-sdf-generator@1.1.1/dist/webgl-sdf-generator.mjs",
+        "bidi-js": "https://unpkg.com/bidi-js@1.0.2/dist/bidi.mjs",
+        "troika-three-utils": "https://unpkg.com/troika-three-utils@0.47.2/dist/troika-three-utils.esm.js",
+        "three/examples/jsm/loaders/GLTFLoader.js": "https://unpkg.com/three@0.160.0/examples/jsm/loaders/GLTFLoader.js",
+        "three/examples/jsm/utils/SkeletonUtils.js": "https://unpkg.com/three@0.160.0/examples/jsm/utils/SkeletonUtils.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    Test: typ in console <code>pushSubscriber("Jelle")</code> om een nieuwe naam toe te voegen.<br>
+    In OBS schakel deze HUD uit (display:none).
+  </div>
+  <!-- Audio placeholders: vul optioneel window.AUDIO_SOURCES = { ambience: 'pad.mp3', ping: 'pad.mp3' } in -->
+  <audio id="ambience" loop></audio>
+  <audio id="ping"></audio>
+  <button id="startAudioBtn" title="Start audio">🔊 Audio starten</button>
+  <div id="sharkControls">
+    <div id="sharkChargeLabel">Shark Attack</div>
+    <div id="sharkControlsRow">
+      <div id="sharkChargeWrap"><div id="sharkChargeBar"></div></div>
+      <button id="spawnSharkBtn" title="Trigger haai">🦈 Haai!</button>
+    </div>
+  </div>
+  <canvas id="c"></canvas>
+  <div id="fadeOverlay"></div>
+
+  <script type="module">
+    import * as THREE from "three";
+    import { Text } from "troika-three-text";
+    import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+    import { clone as skeletonClone } from "three/examples/jsm/utils/SkeletonUtils.js";
+
+    // ======= SANDBOX BRIDGE SAFE-GUARD =======
+    function ensureSandboxSafeSessionStorage(){
+      const createMemoryStorage = () => {
+        const store = new Map();
+        return {
+          getItem: key => (store.has(String(key)) ? store.get(String(key)) : null),
+          setItem: (key, value) => { store.set(String(key), String(value)); },
+          removeItem: key => { store.delete(String(key)); },
+          clear: () => { store.clear(); },
+          key: index => {
+            const keys = Array.from(store.keys());
+            const idx = Number(index) || 0;
+            return keys[idx] ?? null;
+          },
+          get length(){ return store.size; }
+        };
+      };
+
+      try {
+        const test = window.sessionStorage;
+        if (test) return;
+      } catch (err) {
+        const memoryStore = createMemoryStorage();
+        const defineSafeStore = (target) => {
+          Object.defineProperty(target, 'sessionStorage', {
+            configurable: true,
+            get: () => memoryStore
+          });
+        };
+
+        try { defineSafeStore(window); } catch (defineErr) {}
+        try {
+          if (window.Window && window.Window.prototype) {
+            defineSafeStore(window.Window.prototype);
+          }
+        } catch (defineErr) {
+          // noop
+        }
+      }
+
+      window.addEventListener('error', (evt) => {
+        if (evt?.filename?.includes('bridge.js') && /sessionStorage/i.test(evt?.message || '')) {
+          evt.preventDefault();
+          evt.stopImmediatePropagation();
+          console.info('bridge.js sessionStorage toegang genegeerd binnen sandbox.');
+        }
+      }, true);
+    }
+
+    ensureSandboxSafeSessionStorage();
+
+    // ======= AUDIO FALLBACKS =======
+    function createPcm16WavUrl(samples, sampleRate){
+      const bytesPerSample = 2;
+      const channels = 1;
+      const blockAlign = channels * bytesPerSample;
+      const byteRate = sampleRate * blockAlign;
+      const dataSize = samples.length * bytesPerSample;
+      const buffer = new ArrayBuffer(44 + dataSize);
+      const view = new DataView(buffer);
+      let offset = 0;
+
+      const writeString = (str) => {
+        for (let i=0;i<str.length;i++){ view.setUint8(offset++, str.charCodeAt(i)); }
+      };
+      const writeUint32 = (val) => { view.setUint32(offset, val, true); offset += 4; };
+      const writeUint16 = (val) => { view.setUint16(offset, val, true); offset += 2; };
+
+      writeString('RIFF');
+      writeUint32(36 + dataSize);
+      writeString('WAVE');
+      writeString('fmt ');
+      writeUint32(16);
+      writeUint16(1);
+      writeUint16(channels);
+      writeUint32(sampleRate);
+      writeUint32(byteRate);
+      writeUint16(blockAlign);
+      writeUint16(16);
+      writeString('data');
+      writeUint32(dataSize);
+
+      for (let i=0;i<samples.length;i++){
+        const s = Math.max(-1, Math.min(1, samples[i] || 0));
+        const value = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        view.setInt16(offset, value, true);
+        offset += bytesPerSample;
+      }
+
+      return URL.createObjectURL(new Blob([buffer], { type: 'audio/wav' }));
+    }
+
+    function createSilenceUrl(durationSeconds=1, sampleRate=16000){
+      const sampleCount = Math.max(1, Math.floor(durationSeconds * sampleRate));
+      return createPcm16WavUrl(new Float32Array(sampleCount), sampleRate);
+    }
+
+    function createPingUrl(durationSeconds=0.25, sampleRate=44100, frequency=660){
+      const sampleCount = Math.max(1, Math.floor(durationSeconds * sampleRate));
+      const samples = new Float32Array(sampleCount);
+      for (let i=0;i<sampleCount;i++){
+        const t = i / sampleRate;
+        const envelope = Math.max(0, 1 - (t / durationSeconds));
+        samples[i] = Math.sin(2 * Math.PI * frequency * t) * envelope * 0.5;
+      }
+      return createPcm16WavUrl(samples, sampleRate);
+    }
+
+    const AUDIO_FALLBACK = {
+      ambience: createSilenceUrl(1.2, 16000),
+      ping: createPingUrl(0.25, 44100, 660)
+    };
+
+    const resolveAudioSource = (key) => {
+      const cfg = window.AUDIO_SOURCES;
+      if (cfg && typeof cfg[key] === 'string' && cfg[key].trim().length) {
+        return cfg[key].trim();
+      }
+      console.info(`Geen custom ${key}-audio gevonden; ingebouwde placeholder wordt gebruikt.`);
+      return AUDIO_FALLBACK[key];
+    };
+
+    // ======= CONFIG =======
+    const W = 1280, H = 720;                 // zet gelijk aan OBS Browser Source
+    const DPR = Math.min(2, window.devicePixelRatio || 1);
+
+    const ROCK_COUNT = 14;                   // aantal rotsen op route
+    const RING_RADIUS = 74;                  // globale lus
+    const FLOOR_Y = -16;                     // gemiddelde zeebodem
+    const STOP_TIME = 2600;                  // ms stilstand per rots
+    const SWIM_TIME = 4200;                  // ms tussen rotsen
+    const CAMERA_BOB = { x:0.0018, z:0.0026 }; // mini schommel
+    const LAMP = {
+      color: 0x9fdcff,
+      intensity: 3.4,
+      distance: 120,
+      angle: Math.PI/8.8,
+      penumbra: 0.5
+    };
+    const PANEL_DIST_TRIGGER = 46;           // afstand voor volle glow
+    const NAME_STYLE = {
+      color: 0xB8FFF6,
+      outlineColor: 0x5AF2E2,
+      outlineWidth: 0.02,
+      outlineBlur: 0.006
+    };
+    const PLACEHOLDERS = ["Jelle","Noa","Koen","Mila","Saar","Dex","Nova","Lars","Lynn","Ties","Fien","Bram","Pleun","Roos"];
+    const UP = new THREE.Vector3(0, 1, 0);
+    const SHARK_FORWARD = new THREE.Vector3(1, 0, 0);
+    const HIERO_STYLE = {
+      color: 0x75F5FF,
+      baseOpacity: 0.12,
+      glowOpacity: 0.55
+    };
+    const SHARK_TIMING = {
+      orbit: 5200,
+      lineup: 2200,
+      attack: 1600,
+      consume: 1400
+    };
+    const SHARK_CONTACT_DISTANCE = 3.6;
+    const SHARK_ORBIT = {
+      radius: 24,
+      verticalSwing: 0.6,
+      turns: 1.1
+    };
+    const SHARK_FLIP_QUAT = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+
+    const CORAL_COLORS = [0x1ccfd9, 0x2fe3ff, 0x2ac1ff, 0x59f6ff, 0x54ffe4];
+    const coralAnimatedMeshes = [];
+    const roamingSharks = [];
+    const pendingAmbientSharks = [];
+    const mistLayers = [];
+    const lightColumns = [];
+
+    // ======= RENDERER / SCENE / CAMERA =======
+    const canvas = document.getElementById('c');
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias:true, alpha:true });
+    renderer.setPixelRatio(DPR);
+    renderer.setSize(W, H, false);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.setClearColor(0x021625, 1);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x05374b, 0.0115);
+
+    const camera = new THREE.PerspectiveCamera(70, W/H, 0.1, 2000);
+    camera.position.set(0, 0, 10);
+
+    // --- SKY-DOME (proceduraal, geen files) ---
+    const domeGeo = new THREE.SphereGeometry(800, 64, 32);
+    domeGeo.scale(-1, 1, 1);
+
+    const topColor = new THREE.Color(0x0d4d69);
+    const bottomColor = new THREE.Color(0x0f2f43);
+
+    const domeMat = new THREE.ShaderMaterial({
+      uniforms: {
+        topColor:    { value: topColor },
+        bottomColor: { value: bottomColor }
+      },
+      vertexShader: `
+        varying vec3 vWorldPos;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 topColor;
+        uniform vec3 bottomColor;
+        varying vec3 vWorldPos;
+        void main() {
+          float h = clamp((vWorldPos.y + 420.0) / 820.0, 0.0, 1.0);
+          float horizon = smoothstep(0.2, 0.6, h);
+          float zenith = smoothstep(0.55, 1.0, h);
+          vec3 horizonColor = mix(bottomColor, topColor, 0.42);
+          vec3 col = mix(bottomColor * 0.85, horizonColor, horizon);
+          col = mix(col, topColor, zenith);
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
+      side: THREE.BackSide,
+      depthWrite: false
+    });
+
+    const skyDome = new THREE.Mesh(domeGeo, domeMat);
+    scene.add(skyDome);
+
+    makeMistLayer(420, 320, 0.34);
+    makeMistLayer(260, 220, 0.28);
+    makeMistLayer(160, 160, 0.22);
+
+    makeLightColumn(120, 320, 0.12);
+    makeLightColumn(80, 260, 0.1);
+
+    const diverRig = new THREE.Group();
+    diverRig.position.set(0.88, -0.62, -1.12);
+    diverRig.rotation.set(0.12, 0.42, 0.08);
+    camera.add(diverRig);
+
+    // ======= LICHT + VOLUMETRISCHE CONE =======
+    const spot = new THREE.SpotLight(LAMP.color, LAMP.intensity, LAMP.distance, LAMP.angle, 0.45, 1.1);
+    spot.position.set(0.18, -0.1, -1.92);
+    spot.castShadow = false;
+    const spotTarget = new THREE.Object3D();
+    spotTarget.position.set(0.18, -0.1, -4.4);
+    diverRig.add(spot);
+    diverRig.add(spotTarget);
+    spot.target = spotTarget;
+    scene.add(camera);
+    scene.add(new THREE.AmbientLight(0x223546, 0.65));
+
+    // semi-transparante kegel om de lichtbundel zichtbaar te maken
+    const coneGeom = new THREE.ConeGeometry(12, 40, 48, 1, true);
+    coneGeom.translate(0, 0, -20);
+    coneGeom.rotateX(-Math.PI/2);
+    const coneMat = new THREE.MeshBasicMaterial({
+      color: 0x7cd5ff, transparent:true, opacity:0.07,
+      blending: THREE.AdditiveBlending, depthWrite:false
+    });
+    const beamCone = new THREE.Mesh(coneGeom, coneMat);
+    beamCone.position.set(0.18, -0.1, -1.92);
+    diverRig.add(beamCone);
+
+    // ======= DUIKER HAND + ZAKLAMP =======
+    const diverArm = new THREE.Group();
+    diverRig.add(diverArm);
+    diverArm.userData = { baseRotation: diverArm.rotation.clone() };
+
+    const sleeveMat = new THREE.MeshPhysicalMaterial({ color: 0x14242e, roughness: 0.78, metalness: 0.08 });
+    const sleeve = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.72, 12, 18), sleeveMat);
+    sleeve.rotation.x = Math.PI/2;
+    sleeve.position.set(0.02, 0.02, -0.54);
+    diverArm.add(sleeve);
+
+    const gloveMat = new THREE.MeshPhysicalMaterial({ color: 0x1c3645, roughness: 0.55, metalness: 0.18 });
+    const glove = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, 0.38, 10, 16), gloveMat);
+    glove.rotation.x = Math.PI/2;
+    glove.position.set(0.18, -0.08, -1.0);
+    glove.scale.set(1.15, 1.0, 1.3);
+    diverArm.add(glove);
+
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.2, 0.32), gloveMat);
+    palm.position.set(0.26, -0.12, -1.1);
+    palm.rotation.set(0.1, -0.28, 0.35);
+    diverArm.add(palm);
+
+    const thumb = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.09, 0.32, 12), gloveMat);
+    thumb.rotation.set(Math.PI/2 * 0.86, 0.45, 0.35);
+    thumb.position.set(0.36, -0.2, -0.94);
+    diverArm.add(thumb);
+
+    const fingerGeo = new THREE.BoxGeometry(0.28, 0.08, 0.12);
+    for (let f=0; f<3; f++) {
+      const finger = new THREE.Mesh(fingerGeo, gloveMat);
+      finger.position.set(0.42 + f*0.05, -0.16 + f*0.015, -1.18 - f*0.05);
+      finger.rotation.set(0.12, -0.55 + f*0.08, 0.32 - f*0.1);
+      diverArm.add(finger);
+    }
+
+    const torchMat = new THREE.MeshPhysicalMaterial({ color: 0x1a2f3d, roughness: 0.38, metalness: 0.6 });
+    const flashlight = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.14, 0.96, 24), torchMat);
+    flashlight.rotation.x = Math.PI/2;
+    flashlight.position.set(0.18, -0.1, -1.45);
+    flashlight.userData = { baseRotation: flashlight.rotation.clone() };
+    diverArm.add(flashlight);
+
+    const torchHead = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.18, 0.22, 24), torchMat);
+    torchHead.rotation.x = Math.PI/2;
+    torchHead.position.set(0.18, -0.1, -1.95);
+    diverArm.add(torchHead);
+
+    const torchLens = new THREE.Mesh(new THREE.CircleGeometry(0.17, 24), new THREE.MeshBasicMaterial({ color: 0xa8ecff, transparent:true, opacity:0.55 }));
+    torchLens.position.set(0.18, -0.1, -2.06);
+    torchLens.rotation.x = -Math.PI/2;
+    diverArm.add(torchLens);
+
+    const strap = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.03, 12, 24), new THREE.MeshPhysicalMaterial({ color: 0x0e1f28, roughness:0.6, metalness:0.2 }));
+    strap.rotation.set(Math.PI/2, 0, 0.18);
+    strap.position.set(0.18, -0.09, -1.2);
+    strap.userData = { baseRotation: strap.rotation.clone() };
+    diverArm.add(strap);
+
+    diverRig.userData = {
+      arm: diverArm,
+      flashlight,
+      strap,
+      basePosition: diverRig.position.clone(),
+      baseRotation: diverRig.rotation.clone(),
+      swayOffset: Math.random()*Math.PI*2
+    };
+
+    // ======= CAUSTICS "PROJECTIE" (fake) =======
+    function makeCausticsTexture(size=256) {
+      const can = document.createElement('canvas'); can.width=size; can.height=size;
+      const ctx = can.getContext('2d');
+      const imgData = ctx.createImageData(size, size);
+      for (let y=0;y<size;y++){
+        for (let x=0;x<size;x++){
+          const nx = x/size, ny = y/size;
+          const v = Math.sin(nx*40)+Math.sin(ny*40)+Math.sin((nx+ny)*30);
+          const val = Math.max(0, v*0.5+0.5) * 255;
+          const i = (y*size + x)*4;
+          imgData.data[i+0] = 180;
+          imgData.data[i+1] = 255;
+          imgData.data[i+2] = 230;
+          imgData.data[i+3] = val*0.18;
+        }
+      }
+      ctx.putImageData(imgData,0,0);
+      const tex = new THREE.CanvasTexture(can);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      return tex;
+    }
+    const causticsTex = makeCausticsTexture(256);
+
+    const caustics = new THREE.Mesh(
+      new THREE.PlaneGeometry(600, 600),
+      new THREE.MeshBasicMaterial({
+        map: causticsTex, transparent:true, opacity:0.55,
+        blending: THREE.AdditiveBlending, depthWrite:false
+      })
+    );
+    caustics.rotation.x = -Math.PI/2;
+    caustics.position.y = FLOOR_Y + 0.1;
+    scene.add(caustics);
+
+    // ======= OCEAANBODEM =======
+    const floorGeom = new THREE.PlaneGeometry(600, 600, 200, 200);
+    floorGeom.rotateX(-Math.PI/2);
+    const basePos = floorGeom.attributes.position.array.slice();
+    const floorMat = new THREE.MeshStandardMaterial({ color:0x0e2833, roughness:1.0, metalness:0.0 });
+    const floor = new THREE.Mesh(floorGeom, floorMat);
+    floor.position.y = FLOOR_Y;
+    scene.add(floor);
+
+    function duneHeight(x, z, t) {
+      return Math.sin(x*0.02 + t*0.4)*0.6 + Math.cos(z*0.018 - t*0.35)*0.6;
+    }
+    function animateFloor(t) {
+      const pos = floorGeom.attributes.position;
+      for (let i=0;i<pos.count;i++){
+        const ix=i*3, iz=i*3+2, iy=i*3+1;
+        const x=basePos[ix], z=basePos[iz];
+        pos.array[iy] = basePos[iy] + duneHeight(x, z, t);
+      }
+      pos.needsUpdate = true;
+      floorGeom.computeVertexNormals();
+    }
+
+    // ======= RONDE BUBBELSPRITES =======
+    function makeBubbleTexture(size=72){
+      const can = document.createElement('canvas'); can.width=size; can.height=size;
+      const ctx = can.getContext('2d');
+      const g = ctx.createRadialGradient(size/2, size/2, size*0.15, size/2, size/2, size*0.48);
+      g.addColorStop(0, 'rgba(230,245,255,0.9)');
+      g.addColorStop(0.45, 'rgba(190,235,255,0.2)');
+      g.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = g; ctx.fillRect(0,0,size,size);
+      const tex = new THREE.CanvasTexture(can);
+      tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+      return tex;
+    }
+    const bubbleTex = makeBubbleTexture(72);
+
+    function makeBubbles(){
+      const g = new THREE.BufferGeometry();
+      const COUNT = 900;
+      const pos = new Float32Array(COUNT*3);
+      const scale = new Float32Array(COUNT);
+      const speed = new Float32Array(COUNT);
+      for (let i=0;i<COUNT;i++){
+        pos[i*3+0] = (Math.random()-0.5)*240;
+        pos[i*3+1] = (Math.random())*120 + FLOOR_Y + 4;
+        pos[i*3+2] = (Math.random()-0.5)*240;
+        scale[i] = 0.75 + Math.random()*0.85;
+        speed[i] = 0.15 + Math.random()*0.35;
+      }
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      g.setAttribute('scale', new THREE.BufferAttribute(scale, 1));
+      g.setAttribute('speed', new THREE.BufferAttribute(speed, 1));
+      const m = new THREE.PointsMaterial({
+        map: bubbleTex,
+        size: 1.4,
+        transparent:true,
+        depthWrite:false,
+        color:0xbef2ff,
+        opacity:0.65,
+        blending: THREE.NormalBlending
+      });
+      const bubbles = new THREE.Points(g, m);
+      bubbles.userData = { basePositions: pos.slice(0) };
+      return bubbles;
+    }
+    const bubbles = makeBubbles();
+    scene.add(bubbles);
+
+    function animateSharkBody(shark, now){
+      if (!shark) return;
+      const data = shark.userData || {};
+      if (data.isGLB) return;
+      const phase = now*0.006 + (data.wiggleOffset || 0);
+      const wiggle = Math.sin(phase) * 0.45;
+      if (data.tail) data.tail.rotation.y = wiggle;
+      if (data.tailFin) data.tailFin.rotation.y = wiggle * 1.8;
+      if (data.dorsal) data.dorsal.rotation.y = wiggle * 0.2;
+      if (Array.isArray(data.fins)){
+        data.fins.forEach((fin, idx) => {
+          if (!fin) return;
+          fin.rotation.y = wiggle * (idx === 0 ? -0.35 : 0.35);
+        });
+      }
+      if (data.jaw){
+        const base = data.jawBase ?? data.jaw.rotation.z;
+        const extra = data.jawExtraOpen || 0;
+        data.jaw.rotation.z = base - extra + Math.sin(phase*1.4)*0.05;
+      }
+      if (Array.isArray(data.gills)){
+        data.gills.forEach((gill, idx) => {
+          if (!gill) return;
+          const breathe = 0.012 + Math.sin(phase*1.1 + idx*0.4)*0.015;
+          gill.scale.z = 1 + breathe;
+        });
+      }
+    }
+
+    // ======= GLB HAAI LADEN =======
+    const gltfLoader = new GLTFLoader();
+    gltfLoader.setCrossOrigin('anonymous');
+    let sharkTemplate = null;
+    let sharkClips = [];
+
+    const SHARK_GLB_SOURCES = (window.SHARK_GLB_SOURCES && Array.isArray(window.SHARK_GLB_SOURCES)
+      ? window.SHARK_GLB_SOURCES
+      : [
+          '/assets/shark_glb.glb',
+          './assets/shark.glb',
+          './shark.glb'
+        ]
+    ).filter(Boolean);
+
+    let resolveSharkReady = null;
+    let sharkReadyResolved = SHARK_GLB_SOURCES.length === 0;
+    let sharkGlbLoaded = false;
+    const sharkReadyPromise = sharkReadyResolved ? Promise.resolve() : new Promise(res => { resolveSharkReady = res; });
+
+    function markSharkReady(success){
+      if (success) sharkGlbLoaded = true;
+      else pendingAmbientSharks.length = 0;
+      if (!sharkReadyResolved){
+        sharkReadyResolved = true;
+        if (resolveSharkReady){
+          resolveSharkReady();
+          resolveSharkReady = null;
+        }
+      }
+    }
+
+    function loadSharkGlbFromQueue(index = 0){
+      if (!SHARK_GLB_SOURCES.length || index >= SHARK_GLB_SOURCES.length){
+        console.warn('Geen werkende GLB-bron gevonden; voeg een eigen pad toe via window.SHARK_GLB_SOURCES voordat het script laadt of plaats een bestand in ./assets/shark.glb. Verval nu naar het procedurale model.');
+        sharkTemplate = null;
+        sharkClips = [];
+        markSharkReady(false);
+        return;
+      }
+
+      const url = SHARK_GLB_SOURCES[index];
+      console.info('Probeer GLB:', url);
+      gltfLoader.load(
+        url,
+        (gltf) => {
+          sharkTemplate = gltf.scene;
+          sharkTemplate.traverse(o => {
+            if (o.isMesh){
+              o.castShadow = false;
+              o.receiveShadow = false;
+              if (o.material) {
+                o.material.side = THREE.DoubleSide;
+                o.material.needsUpdate = true;
+              }
+            }
+          });
+          sharkTemplate.position.set(0,0,0);
+          sharkTemplate.rotation.set(0,0,0);
+          sharkTemplate.rotateY(Math.PI);
+          sharkTemplate.rotateZ(Math.PI);
+          sharkTemplate.scale.set(1,1,1);
+
+          const bbox = tmpBox.setFromObject(sharkTemplate);
+          const size = bbox.getSize(tmpVecA);
+          const maxDim = Math.max(size.x, size.y, size.z) || 1;
+          const targetLength = 12;
+          const fitScale = targetLength / maxDim;
+          sharkTemplate.scale.multiplyScalar(fitScale);
+
+          tmpBox.setFromObject(sharkTemplate);
+          const center = tmpBox.getCenter(tmpVecCenter);
+          sharkTemplate.position.sub(center);
+
+          sharkClips = gltf.animations || [];
+          console.info('GLB haai geladen:', url, sharkClips.map(c=>c.name));
+          if (pendingAmbientSharks.length){
+            pendingAmbientSharks.splice(0).forEach(({origin, radius}) => spawnAmbientShark(origin, radius));
+          }
+          markSharkReady(true);
+        },
+        undefined,
+        (err) => {
+          console.warn('GLB laden mislukte:', url, err?.message || err);
+          loadSharkGlbFromQueue(index + 1);
+        }
+      );
+    }
+
+    if (SHARK_GLB_SOURCES.length){
+      loadSharkGlbFromQueue();
+    } else {
+      markSharkReady(false);
+    }
+
+    function makeGLBShark(){
+      if (!sharkTemplate) return null;
+      const shark = skeletonClone(sharkTemplate);
+      const mixer = new THREE.AnimationMixer(shark);
+      let swim = null;
+      if (sharkClips.length){
+        swim = sharkClips.find(c=>/swim/i.test(c.name)) ||
+               sharkClips.reduce((a,b)=>(a?.duration||0)>(b?.duration||0)?a:b, null);
+        if (swim) mixer.clipAction(swim).play();
+      }
+      shark.userData.mixer = mixer;
+      shark.userData.actions = { swim };
+      shark.userData.isGLB = true;
+      return shark;
+    }
+
+    // ======= ROTSEN + NAAM TEKST =======
+    const rockGroup = new THREE.Group(); scene.add(rockGroup);
+    const rocks = [];
+    const waypoints = [];
+    const surfaceRay = new THREE.Raycaster();
+    const normalMatrix = new THREE.Matrix3();
+    const orientMatrix = new THREE.Matrix4();
+    const worldPos = new THREE.Vector3();
+    const surfaceNormalTmp = new THREE.Vector3();
+    const tmpVecA = new THREE.Vector3();
+    const tmpVecB = new THREE.Vector3();
+    const tmpVecC = new THREE.Vector3();
+    const tmpVecD = new THREE.Vector3();
+    const tmpQuat = new THREE.Quaternion();
+    const tmpMatrix = new THREE.Matrix4();
+    const tmpBox = new THREE.Box3();
+    const tmpVecCenter = new THREE.Vector3();
+
+    function placeOnFloor(x, z, t=0) {
+      return FLOOR_Y + duneHeight(x, z, t);
+    }
+
+    function layeredNoise(x, y, z, seedA, seedB){
+      let value = 0;
+      let amp = 0.65;
+      let freq = 0.35;
+      for (let i=0;i<4;i++){
+        const nx = x * freq + seedA;
+        const ny = y * freq * 1.2 - seedB;
+        const nz = z * freq * 0.8 + seedA * 0.7;
+        value += Math.sin(nx) * Math.cos(ny) * amp;
+        value += Math.sin(nz + nx*0.7) * amp * 0.4;
+        freq *= 1.8;
+        amp *= 0.55;
+      }
+      return value;
+    }
+
+    function makeRock(){
+      const radius = 4.6 + Math.random()*2.4;
+      const detail = 4;
+      const geo = new THREE.IcosahedronGeometry(radius, detail);
+      const pos = geo.attributes.position;
+      const seedA = Math.random()*Math.PI*2;
+      const seedB = Math.random()*Math.PI*2;
+
+      for (let i=0;i<pos.count;i++){
+        const x = pos.getX(i);
+        const y = pos.getY(i);
+        const z = pos.getZ(i);
+        const noise = layeredNoise(x*0.32, y*0.32, z*0.32, seedA, seedB);
+        const radial = 1 + noise*0.35 + Math.sin((x+z)*0.18 + seedA)*0.08;
+        pos.setXYZ(i, x * radial, y * (radial + noise*0.12), z * radial);
+      }
+
+      pos.needsUpdate = true;
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+
+      const color = new THREE.Color().setHSL(0.56 + Math.random()*0.035, 0.34 + Math.random()*0.08, 0.18 + Math.random()*0.08);
+      const mat = new THREE.MeshPhysicalMaterial({
+        color,
+        roughness: 0.9,
+        metalness: 0.04,
+        clearcoat: 0.08,
+        clearcoatRoughness: 0.95,
+        sheen: 0.15,
+        sheenRoughness: 0.9
+      });
+
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.receiveShadow = false;
+      mesh.castShadow = false;
+      return mesh;
+    }
+
+    // ======= HAAI: gebruik GLB, anders fallback =======
+    function makeShark(){
+      const glb = makeGLBShark();
+      if (glb) return glb; // GLB klaar → gebruiken
+
+      // FALLBACK (optioneel): primitieve haai zolang GLB nog niet geladen is
+      const group = new THREE.Group();
+      const bodyMat = new THREE.MeshPhysicalMaterial({
+        color: 0x4c6476,
+        roughness: 0.32,
+        metalness: 0.18,
+        clearcoat: 0.1,
+        clearcoatRoughness: 0.8,
+        sheen: 0.28,
+        sheenRoughness: 0.6
+      });
+      const bellyMat = bodyMat.clone();
+      bellyMat.color = new THREE.Color(0xe8f4ff);
+
+      const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.45, 2.6, 12, 24), bodyMat);
+      body.rotation.z = Math.PI/2;
+      group.add(body);
+
+      const head = new THREE.Mesh(new THREE.ConeGeometry(0.75, 1.8, 24), bodyMat);
+      head.rotation.z = -Math.PI/2;
+      head.position.set(1.55, 0, 0);
+      group.add(head);
+
+      const jaw = new THREE.Mesh(new THREE.ConeGeometry(0.72, 1.4, 24), bellyMat);
+      jaw.rotation.z = -Math.PI/2 + 0.45;
+      jaw.position.set(1.5, -0.18, 0);
+      jaw.scale.set(1.02, 0.68, 0.92);
+      group.add(jaw);
+
+      const tail = new THREE.Mesh(new THREE.ConeGeometry(0.42, 1.3, 20), bodyMat);
+      tail.rotation.z = Math.PI/2;
+      tail.position.set(-1.55, 0, 0);
+      group.add(tail);
+
+      const tailFin = new THREE.Mesh(new THREE.ConeGeometry(0.3, 1.1, 16), bodyMat);
+      tailFin.rotation.set(Math.PI, 0, 0);
+      tailFin.position.set(-2.0, 0.55, 0);
+      group.add(tailFin);
+
+      const dorsal = new THREE.Mesh(new THREE.ConeGeometry(0.28, 1.1, 16), bodyMat);
+      dorsal.rotation.set(Math.PI, 0, 0);
+      dorsal.position.set(0.2, 0.7, 0);
+      group.add(dorsal);
+
+      const gillGeo = new THREE.BoxGeometry(0.04, 0.9, 0.45);
+      const gillMat = new THREE.MeshPhysicalMaterial({ color: 0x1d2a33, roughness:0.4, metalness:0.05 });
+      const gills = [];
+      for (let i=0;i<4;i++){
+        const gillL = new THREE.Mesh(gillGeo, gillMat);
+        gillL.position.set(0.5 + i*0.16, 0.0, 0.55);
+        gillL.rotation.y = Math.PI/12;
+        group.add(gillL);
+        gills.push(gillL);
+        const gillR = gillL.clone();
+        gillR.position.z = -0.55;
+        gillR.rotation.y = -Math.PI/12;
+        group.add(gillR);
+        gills.push(gillR);
+      }
+
+      const pectoralGeo = new THREE.ConeGeometry(0.25, 1.05, 16);
+      const leftFin = new THREE.Mesh(pectoralGeo, bodyMat);
+      leftFin.rotation.set(Math.PI/1.4, 0.35, -Math.PI/2);
+      leftFin.position.set(0.05, -0.15, 0.52);
+      group.add(leftFin);
+      const rightFin = leftFin.clone();
+      rightFin.rotation.y += Math.PI;
+      rightFin.position.z = -0.52;
+      group.add(rightFin);
+
+      group.scale.setScalar(6);
+      group.userData = {
+        tail, tailFin, dorsal, jaw, jawBase: jaw.rotation.z,
+        wiggleOffset: Math.random()*Math.PI*2, fins:[]
+      };
+      return group;
+    }
+
+    function makeNameText(name="???") {
+      const text = new Text();
+      text.text = name;
+      text.fontSize = 1.1;
+      text.color = NAME_STYLE.color;
+      text.outlineWidth = NAME_STYLE.outlineWidth;
+      text.outlineColor = NAME_STYLE.outlineColor;
+      text.outlineBlur = NAME_STYLE.outlineBlur;
+      text.anchorX = 'center';
+      text.anchorY = 'middle';
+      text.letterSpacing = 0.02;
+      text.curveRadius = 0; // vlak
+      text.depthOffset = 1;
+      text.material.depthWrite = false;
+      text.renderOrder = 5;
+      text.userData = { glow: 0, baseColor: NAME_STYLE.color };
+      text.sync();
+      return text;
+    }
+
+    let hieroTexturePool = [];
+    function makeHieroglyphTexture(size=96){
+      const can = document.createElement('canvas');
+      can.width = can.height = size;
+      const ctx = can.getContext('2d');
+      ctx.clearRect(0,0,size,size);
+      ctx.lineCap = 'round';
+      ctx.shadowColor = 'rgba(140,255,255,0.9)';
+      ctx.shadowBlur = size * 0.12;
+
+      const strokes = 3 + Math.floor(Math.random()*4);
+      for (let i=0;i<strokes;i++){
+        const hue = 170 + Math.random()*40;
+        ctx.strokeStyle = `hsla(${hue}, 100%, ${70+Math.random()*12}%, ${0.45 + Math.random()*0.25})`;
+        ctx.lineWidth = size * (0.035 + Math.random()*0.05);
+        ctx.beginPath();
+        const segments = 3 + Math.floor(Math.random()*4);
+        let x = size*(0.2 + Math.random()*0.6);
+        let y = size*(0.2 + Math.random()*0.6);
+        ctx.moveTo(x, y);
+        for (let s=0;s<segments;s++){
+          x += size*(Math.random()-0.5)*0.45;
+          y += size*(Math.random()-0.5)*0.45;
+          ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+
+      const texture = new THREE.CanvasTexture(can);
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.wrapS = texture.wrapT = THREE.ClampToEdgeWrapping;
+      texture.needsUpdate = true;
+      return texture;
+    }
+
+    function makeHieroglyphPanel(scale=1){
+      if (hieroTexturePool.length < 24){
+        hieroTexturePool.push(makeHieroglyphTexture());
+      }
+      const texture = hieroTexturePool[Math.floor(Math.random()*hieroTexturePool.length)];
+
+      const geom = new THREE.PlaneGeometry(1, 1);
+      const mat = new THREE.MeshBasicMaterial({
+        map: texture,
+        transparent:true,
+        color: HIERO_STYLE.color,
+        blending: THREE.AdditiveBlending,
+        depthWrite:false,
+        depthTest:true,
+        opacity: HIERO_STYLE.baseOpacity
+      });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.scale.set(scale, scale, scale);
+      mesh.userData = { glow:0, baseOpacity: HIERO_STYLE.baseOpacity, maxOpacity: HIERO_STYLE.glowOpacity };
+      return mesh;
+    }
+
+    function makeCoralBranch(){
+      const height = 1.1 + Math.random()*1.4;
+      const baseRadius = 0.18 + Math.random()*0.18;
+      const topRadius = baseRadius * (0.25 + Math.random()*0.25);
+      const geom = new THREE.CylinderGeometry(topRadius, baseRadius, height, 16, 8, true);
+      const pos = geom.attributes.position;
+      for (let i=0;i<pos.count;i++){
+        const y = pos.getY(i);
+        const radialNoise = (Math.sin(pos.getX(i)*4 + y*3) + Math.sin(pos.getZ(i)*5 - y*4))*0.03;
+        const scale = 1 + radialNoise;
+        pos.setX(i, pos.getX(i)*scale);
+        pos.setZ(i, pos.getZ(i)*scale);
+      }
+      pos.needsUpdate = true;
+      geom.computeVertexNormals();
+
+      const color = new THREE.Color(CORAL_COLORS[Math.floor(Math.random()*CORAL_COLORS.length)]);
+      const mat = new THREE.MeshPhysicalMaterial({
+        color,
+        roughness: 0.45,
+        metalness: 0.05,
+        emissive: color.clone().multiplyScalar(0.12),
+        transparent:true,
+        opacity:0.95
+      });
+
+      const branch = new THREE.Mesh(geom, mat);
+      branch.castShadow = false;
+      branch.receiveShadow = false;
+
+      const cap = new THREE.Mesh(new THREE.SphereGeometry(topRadius*1.4, 14, 10), mat);
+      cap.position.y = height/2;
+      branch.add(cap);
+
+      branch.userData = {
+        baseRotX: branch.rotation.x,
+        baseRotZ: branch.rotation.z,
+        swayAmp: 0.09 + Math.random()*0.07,
+        swayPhase: Math.random()*Math.PI*2
+      };
+      coralAnimatedMeshes.push(branch);
+      return branch;
+    }
+
+    function addCoralAroundRock(rock, baseRadius){
+      const cluster = new THREE.Group();
+      const center = new THREE.Vector3().copy(rock.position);
+      const count = 5 + Math.floor(Math.random()*5);
+      for (let i=0; i<count; i++){
+        const branch = makeCoralBranch();
+        const angle = Math.random()*Math.PI*2;
+        const radius = baseRadius * (0.5 + Math.random()*0.8);
+        const posX = center.x + Math.cos(angle) * radius;
+        const posZ = center.z + Math.sin(angle) * radius;
+        const floorY = placeOnFloor(posX, posZ);
+
+        branch.position.set(posX, floorY, posZ);
+        const outward = new THREE.Vector3(posX - center.x, 0, posZ - center.z).normalize();
+        const tilt = 0.28 + Math.random()*0.2;
+        branch.rotation.x = outward.z * tilt;
+        branch.rotation.z = -outward.x * tilt;
+        branch.userData.baseRotX = branch.rotation.x;
+        branch.userData.baseRotZ = branch.rotation.z;
+
+        branch.position.y += 0.05;
+        cluster.add(branch);
+      }
+      scene.add(cluster);
+      return cluster;
+    }
+
+    function makeMistLayer(radius, height, alpha){
+      const geo = new THREE.CylinderGeometry(radius*0.98, radius, height, 48, 1, true);
+      geo.scale(1,1,-1);
+      const mat = new THREE.ShaderMaterial({
+        transparent:true,
+        depthWrite:false,
+        uniforms:{
+          uRadius:{ value: radius },
+          uHeight:{ value: height },
+          uAlpha:{ value: alpha },
+          uColorTop:{ value: new THREE.Color(0x0f4359) },
+          uColorBottom:{ value: new THREE.Color(0x0b2d3f) }
+        },
+        vertexShader:`
+          varying vec3 vPos;
+          void main(){
+            vPos = position;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0);
+          }
+        `,
+        fragmentShader:`
+          uniform float uRadius;
+          uniform float uHeight;
+          uniform float uAlpha;
+          uniform vec3 uColorTop;
+          uniform vec3 uColorBottom;
+          varying vec3 vPos;
+          void main(){
+            float radial = clamp(length(vPos.xz) / uRadius, 0.0, 1.0);
+            float vertical = clamp((vPos.y + uHeight*0.5) / uHeight, 0.0, 1.0);
+            vec3 base = mix(uColorBottom, uColorTop, vertical);
+            float edgeFade = smoothstep(0.0, 0.7, 1.0 - radial);
+            float alpha = uAlpha * edgeFade;
+            if(alpha <= 0.001) discard;
+            gl_FragColor = vec4(base, alpha);
+          }
+        `,
+        side: THREE.BackSide
+      });
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.userData = { baseAlpha: alpha };
+      mistLayers.push(mesh);
+      scene.add(mesh);
+      return mesh;
+    }
+
+    function makeLightColumn(radius, height, intensity){
+      const geo = new THREE.CylinderGeometry(radius, radius, height, 48, 1, true);
+      geo.scale(1,1,-1);
+      const uniforms = {
+        uRadius:    { value: radius },
+        uHeight:    { value: height },
+        uIntensity: { value: intensity },
+        uTime:      { value: 0 },
+        uTopColor:  { value: new THREE.Color(0x5fe0ff) },
+        uBottomColor:{ value: new THREE.Color(0x2a9ab5) }
+      };
+      const mat = new THREE.ShaderMaterial({
+        uniforms,
+        transparent:true,
+        depthWrite:false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.BackSide,
+        vertexShader:`
+          varying vec3 vPos;
+          void main(){
+            vec4 wp = modelMatrix * vec4(position, 1.0);
+            vPos = position;
+            gl_Position = projectionMatrix * viewMatrix * wp;
+          }
+        `,
+        fragmentShader:`
+          uniform float uRadius;
+          uniform float uHeight;
+          uniform float uIntensity;
+          uniform float uTime;
+          uniform vec3 uTopColor;
+          uniform vec3 uBottomColor;
+          varying vec3 vPos;
+          void main(){
+            float radial = length(vPos.xz) / uRadius;
+            float radialFade = smoothstep(0.25, 1.0, radial);
+            float vertical = clamp((vPos.y + uHeight*0.5) / uHeight, 0.0, 1.0);
+            vec3 baseCol = mix(uBottomColor, uTopColor, pow(vertical, 1.4));
+            float shimmer = sin(vPos.x*0.35 + uTime*1.5) * 0.45 + sin(vPos.z*0.42 - uTime*1.2) * 0.35 + sin(vPos.y*0.2 + uTime) * 0.2;
+            float alpha = uIntensity * (1.0 - radialFade) * clamp(0.55 + shimmer*0.4, 0.0, 1.0);
+            alpha *= smoothstep(0.05, 0.2, vertical) * (1.0 - smoothstep(0.65, 1.0, vertical));
+            if(alpha <= 0.002) discard;
+            gl_FragColor = vec4(baseCol, alpha);
+          }
+        `
+      });
+      const column = new THREE.Mesh(geo, mat);
+      column.position.y = height * 0.5;
+      column.userData = {
+        offset: new THREE.Vector3((Math.random()-0.5)*160, 0, (Math.random()-0.5)*160),
+        height,
+        intensity,
+        uniforms
+      };
+      lightColumns.push(column);
+      scene.add(column);
+      return column;
+    }
+
+    function updateMistLayers(now){
+      const time = now*0.0005;
+      mistLayers.forEach((layer, idx) => {
+        layer.position.copy(camera.position);
+        layer.position.y -= 18 + idx*12;
+        const mat = layer.material;
+        if (mat?.uniforms?.uAlpha){
+          const base = layer.userData?.baseAlpha || 0.2;
+          mat.uniforms.uAlpha.value = base + Math.sin(time + idx)*0.025;
+        }
+      });
+    }
+
+    function updateLightColumns(now){
+      const time = now*0.0007;
+      lightColumns.forEach((col, idx) => {
+        const data = col.userData || {};
+        const offset = data.offset || new THREE.Vector3();
+        col.position.x = camera.position.x + offset.x;
+        col.position.z = camera.position.z + offset.z;
+        col.position.y = -80 + Math.sin(time + idx)*4;
+        col.rotation.y += 0.0004;
+        const uniforms = data.uniforms;
+        if (uniforms){
+          uniforms.uTime.value = time*4.0 + idx*1.37;
+        }
+      });
+    }
+
+    function updateRoamingSharks(now, dt){
+      roamingSharks.forEach((shark) => {
+        const data = shark?.userData?.roam;
+        if (!data) return;
+        data.phase += dt * data.speed;
+        const angle = data.phase;
+        const origin = data.origin;
+        const radius = data.radius;
+        const verticalAmp = data.verticalAmp || 2;
+        const nextPos = tmpVecC.set(
+          origin.x + Math.cos(angle) * radius,
+          origin.y + data.heightOffset + Math.sin(angle*1.4) * verticalAmp,
+          origin.z + Math.sin(angle) * radius
+        );
+        shark.position.copy(nextPos);
+
+        const forwardTarget = tmpVecD.set(
+          origin.x + Math.cos(angle + 0.01) * radius,
+          shark.position.y,
+          origin.z + Math.sin(angle + 0.01) * radius
+        );
+        tmpMatrix.lookAt(shark.position, forwardTarget, UP);
+        shark.quaternion.setFromRotationMatrix(tmpMatrix);
+        shark.quaternion.multiply(SHARK_FLIP_QUAT);
+      });
+    }
+
+    function spawnAmbientShark(origin, radius){
+      if (!sharkTemplate){
+        pendingAmbientSharks.push({ origin: origin.clone(), radius });
+        return null;
+      }
+      const shark = makeGLBShark();
+      if (!shark) {
+        pendingAmbientSharks.push({ origin: origin.clone(), radius });
+        return null;
+      }
+      const scale = 0.45 + Math.random()*0.2;
+      shark.scale.multiplyScalar(scale);
+
+      const phase = Math.random()*Math.PI*2;
+      const speed = 0.25 + Math.random()*0.15;
+      const verticalAmp = 2 + Math.random()*2;
+      const heightOffset = -4 + Math.random()*4;
+
+      shark.userData = shark.userData || {};
+      shark.userData.roam = {
+        origin: origin.clone(),
+        radius,
+        phase,
+        speed,
+        verticalAmp,
+        heightOffset
+      };
+
+      const angle = phase;
+      shark.position.set(
+        origin.x + Math.cos(angle) * radius,
+        origin.y + heightOffset,
+        origin.z + Math.sin(angle) * radius
+      );
+      tmpMatrix.lookAt(shark.position, tmpVecC.set(
+        origin.x + Math.cos(angle + 0.01) * radius,
+        shark.position.y,
+        origin.z + Math.sin(angle + 0.01) * radius
+      ), UP);
+      shark.quaternion.setFromRotationMatrix(tmpMatrix);
+      shark.quaternion.multiply(SHARK_FLIP_QUAT);
+      scene.add(shark);
+      roamingSharks.push(shark);
+      return shark;
+    }
+
+    // bouw ring met rotsen op de bodem, elk met zichtbaar tekstpaneel
+    for (let i=0;i<ROCK_COUNT;i++){
+      const t = i / ROCK_COUNT;
+      const ang = t * Math.PI*2;
+      const r = RING_RADIUS + Math.sin(i*1.7)*6;
+      const radialJitter = (Math.random()-0.5)*4.5;
+      const px = Math.cos(ang) * (r + radialJitter);
+      const pz = Math.sin(ang) * (r + radialJitter);
+      const py = placeOnFloor(px, pz) + Math.random()*2.5;
+
+      const rock = makeRock();
+      rock.position.set(px, py + 3.6, pz);
+      rock.rotation.set((Math.random()-0.5)*0.7, Math.random()*Math.PI*2, (Math.random()-0.5)*0.5);
+      const s = 1.05 + Math.random()*0.9;
+      rock.scale.setScalar(s);
+
+      rockGroup.add(rock);
+      rock.updateMatrixWorld(true);
+
+      const toCenter = new THREE.Vector3(-px, 0, -pz).normalize();
+      const outward = toCenter.clone().multiplyScalar(-1).normalize();
+
+      const baseRadius = (rock.geometry.boundingSphere ? rock.geometry.boundingSphere.radius : 5.2) * s;
+      rock.getWorldPosition(worldPos);
+
+      tmpVecA.copy(outward).multiplyScalar(baseRadius + 3.0);
+      tmpVecB.copy(worldPos).add(tmpVecA);
+      surfaceRay.set(tmpVecB, surfaceNormalTmp.copy(outward).multiplyScalar(-1).normalize());
+      surfaceRay.near = 0.2;
+      surfaceRay.far = baseRadius * 4 + 6;
+
+      const hits = surfaceRay.intersectObject(rock, false);
+      let surfaceNormal = outward.clone();
+      let contactPoint = worldPos.clone().add(outward.clone().multiplyScalar(baseRadius * 0.65));
+
+      if (hits.length){
+        contactPoint.copy(hits[0].point);
+        if (hits[0].face){
+          normalMatrix.getNormalMatrix(rock.matrixWorld);
+          surfaceNormal = hits[0].face.normal.clone().applyMatrix3(normalMatrix).normalize();
+        }
+      }
+      surfaceNormal.normalize();
+
+      let tangent1 = surfaceNormal.clone().cross(UP);
+      if (!Number.isFinite(tangent1.x + tangent1.y + tangent1.z) || tangent1.lengthSq() < 1e-4){
+        tangent1.set(1,0,0).cross(surfaceNormal).normalize();
+      } else {
+        tangent1.normalize();
+      }
+      const tangent2 = surfaceNormal.clone().cross(tangent1).normalize();
+
+      // naam-tekst aan de buitenzijde van de rots
+      const name = PLACEHOLDERS[i % PLACEHOLDERS.length];
+      const text = makeNameText(name);
+      text.curveRadius = -(3.2 + Math.random()*2.4);
+      text.maxWidth = 5.8;
+      const extraOffset = 0.16 + Math.random()*0.12;
+      text.position.copy(contactPoint).add(surfaceNormal.clone().multiplyScalar(extraOffset));
+      orientMatrix.lookAt(text.position, tmpVecB.copy(text.position).sub(surfaceNormal), UP);
+      text.quaternion.setFromRotationMatrix(orientMatrix);
+      text.material.opacity = 0.0;
+      text.userData.surfaceNormal = surfaceNormal.clone();
+      text.sync();
+      scene.add(text);
+
+      const hieroglyphs = [];
+      const glyphCount = 18 + Math.floor(Math.random()*9);
+      const ringRadius = 1.4 + Math.random()*0.5;
+      for (let g=0; g<glyphCount; g++){
+        const scale = 0.45 + Math.random()*0.9;
+        const glyph = makeHieroglyphPanel(scale);
+
+        const angle = (g / glyphCount) * Math.PI * 2 + Math.random()*0.35;
+        const lateral = Math.cos(angle) * ringRadius;
+        const vertical = Math.sin(angle) * (0.6 + Math.random()*2.0);
+        const depthOffset = 0.16 + Math.random()*0.16;
+
+        glyph.position.copy(contactPoint)
+          .add(surfaceNormal.clone().multiplyScalar(depthOffset))
+          .add(tangent1.clone().multiplyScalar(lateral))
+          .add(tangent2.clone().multiplyScalar(vertical));
+        orientMatrix.lookAt(glyph.position, tmpVecB.copy(glyph.position).sub(surfaceNormal), UP);
+        glyph.quaternion.setFromRotationMatrix(orientMatrix);
+        glyph.material.opacity = glyph.userData.baseOpacity;
+        scene.add(glyph);
+        hieroglyphs.push(glyph);
+      }
+
+      const coralCluster = addCoralAroundRock(rock, baseRadius * 0.8);
+
+      if (Math.random() < 0.35){
+        const sharkOrigin = contactPoint.clone().add(surfaceNormal.clone().multiplyScalar(baseRadius * 0.9));
+        const sharkRadius = baseRadius * (1.4 + Math.random()*0.6);
+        spawnAmbientShark(sharkOrigin, sharkRadius);
+      }
+
+      rock.userData = { text, glow:0, occupied:true, name, outward: surfaceNormal.clone(), hieroglyphs, coral: coralCluster };
+      rocks.push(rock);
+
+      // waypoint: plek waar camera stopt (met goed zicht op tekst)
+      const camPullBack = 6.0 + Math.random()*1.7;
+      const wp = text.position.clone().add(surfaceNormal.clone().multiplyScalar(camPullBack));
+      wp.add(UP.clone().multiplyScalar(1.1 + Math.random()*1.0));
+      waypoints.push(wp);
+    }
+
+    // ======= SUB QUEUE =======
+    const subQueue = [];
+    window.pushSubscriber = function(name){
+      subQueue.push(String(name||'Friend'));
+    };
+    function assignNextFreeRock(name) {
+      let target = rocks.find(r => !r.userData.occupied);
+      if (!target) {
+        target = rocks.reduce((a,b)=>(a.userData.lastUsed||0)<(b.userData.lastUsed||0)?a:b);
+      }
+      target.userData.occupied = true;
+      target.userData.name = name;
+      target.userData.lastUsed = performance.now();
+
+      const t = target.userData.text;
+      t.text = name;
+      t.sync();
+      t.material.opacity = 0.0; // fade in via lamp
+    }
+
+    // ======= HAAI SEQUENCE =======
+    const ambience = document.getElementById('ambience');
+    const ping = document.getElementById('ping');
+    const fadeOverlay = document.getElementById('fadeOverlay');
+    const spawnSharkBtn = document.getElementById('spawnSharkBtn');
+    const sharkChargeBar = document.getElementById('sharkChargeBar');
+
+    const sharkEvent = {
+      active: false,
+      stage: 'idle',
+      shark: null,
+      start: 0,
+      attackStart: 0,
+      consumeStart: 0,
+      originCameraPos: new THREE.Vector3(),
+      originCameraQuat: new THREE.Quaternion(),
+      dodgeTarget: new THREE.Vector3(),
+      sharkStartPos: new THREE.Vector3(),
+      sharkMidPos: new THREE.Vector3(),
+      sharkAttackPos: new THREE.Vector3(),
+      sharkExitPos: new THREE.Vector3(),
+      lineupFrom: new THREE.Vector3(),
+      lineupStartTime: 0,
+      lineupTarget: new THREE.Vector3(),
+      orbitCenter: new THREE.Vector3(),
+      orbitRight: new THREE.Vector3(),
+      orbitForward: new THREE.Vector3(),
+      orbitStart: 0,
+      lastForward: new THREE.Vector3(),
+      prevPhase: 'stop',
+      prevWpIndex: 0,
+      prevPhaseStart: 0,
+      prevLastStopIndex: -1
+    };
+
+    const SHARK_CHARGE_REQUIRED = 10;
+    let sharkCharge = 0;
+
+    function updateSharkChargeUI(){
+      if (!sharkChargeBar) return;
+      const pct = Math.min(1, sharkCharge / SHARK_CHARGE_REQUIRED);
+      sharkChargeBar.style.width = (pct * 100).toFixed(1) + '%';
+
+      const startColor = { r: 31, g: 182, b: 255 };
+      const endColor = { r: 235, g: 58, b: 58 };
+      const eased = Math.pow(pct, 1.5);
+      const mixChannel = (key) => Math.round(startColor[key] + (endColor[key] - startColor[key]) * eased);
+      const activeColor = `rgb(${mixChannel('r')}, ${mixChannel('g')}, ${mixChannel('b')})`;
+      sharkChargeBar.style.background = `linear-gradient(90deg, rgb(${startColor.r}, ${startColor.g}, ${startColor.b}), ${activeColor})`;
+    }
+
+    function resetSharkCharge(){
+      sharkCharge = 0;
+      updateSharkChargeUI();
+    }
+
+    updateSharkChargeUI();
+
+    ambience.src = resolveAudioSource('ambience');
+    ping.src = resolveAudioSource('ping');
+
+    document.getElementById('startAudioBtn').addEventListener('click', async (ev) => {
+      try {
+        ambience.volume = 0.45;
+        await ambience.play();
+        ping.volume = 0.7;
+        ev.target.style.display = 'none';
+      } catch(e) { console.warn('Audio kon niet starten:', e); }
+    });
+
+    if (spawnSharkBtn){
+      spawnSharkBtn.addEventListener('click', async () => {
+        if (sharkEvent.active) return;
+        sharkCharge = Math.min(SHARK_CHARGE_REQUIRED, sharkCharge + 1);
+        updateSharkChargeUI();
+        if (sharkCharge >= SHARK_CHARGE_REQUIRED){
+          await startSharkSequence();
+        }
+      });
+    }
+
+    let lastStopIndex = -1;
+
+    window.addEventListener('onEventReceived', (obj) => {
+      try {
+        const { detail } = obj || {};
+        if (!detail || !detail.listener) return;
+        const { listener, event } = detail;
+        if (!event) return;
+        if (listener === 'subscriber-latest' || listener === 'subscriber') {
+          const name = event.name || event.displayName || event.username || 'Subscriber';
+          window.pushSubscriber(name);
+        }
+      } catch(e){}
+    });
+
+    async function startSharkSequence(){
+      if (sharkEvent.active) return;
+      if (!sharkReadyResolved){
+        if (spawnSharkBtn) spawnSharkBtn.disabled = true;
+        try {
+          await sharkReadyPromise;
+        } finally {
+          if (spawnSharkBtn && !sharkEvent.active) spawnSharkBtn.disabled = false;
+        }
+        if (sharkEvent.active) return;
+      }
+      sharkEvent.active = true;
+      resetSharkCharge();
+      sharkEvent.stage = 'orbit';
+      sharkEvent.start = performance.now();
+      sharkEvent.lineupStartTime = 0;
+      sharkEvent.attackStart = 0;
+      sharkEvent.consumeStart = 0;
+      sharkEvent.prevPhase = phase;
+      sharkEvent.prevWpIndex = wpIndex;
+      sharkEvent.prevPhaseStart = phaseStart;
+      sharkEvent.prevLastStopIndex = lastStopIndex;
+      phase = 'shark';
+
+      sharkEvent.originCameraPos.copy(camera.position);
+      sharkEvent.originCameraQuat.copy(camera.quaternion);
+
+      const forward = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion).normalize();
+      sharkEvent.lastForward.copy(forward);
+      const lateral = forward.clone().cross(UP).normalize();
+      if (!Number.isFinite(lateral.x)) lateral.set(1,0,0);
+      const orbitForward = lateral.clone().cross(UP).normalize();
+
+      sharkEvent.orbitRight.copy(lateral);
+      sharkEvent.orbitForward.copy(orbitForward);
+      sharkEvent.orbitCenter.copy(camera.position).add(UP.clone().multiplyScalar(1.8));
+      sharkEvent.orbitStart = sharkEvent.start;
+
+      sharkEvent.dodgeTarget.copy(camera.position).add(UP.clone().multiplyScalar(10.5));
+
+      const shark = makeShark();
+      sharkEvent.shark = shark;
+      const initialPos = sharkEvent.orbitCenter.clone()
+        .add(sharkEvent.orbitForward.clone().multiplyScalar(-SHARK_ORBIT.radius))
+        .add(UP.clone().multiplyScalar(-SHARK_ORBIT.verticalSwing * 0.35));
+      shark.position.copy(initialPos);
+
+      sharkEvent.sharkStartPos.copy(initialPos);
+      sharkEvent.sharkMidPos.copy(camera.position)
+        .add(forward.clone().multiplyScalar(34))
+        .setY(camera.position.y - 2.2);
+      sharkEvent.sharkAttackPos.copy(camera.position)
+        .add(forward.clone().multiplyScalar(1.3))
+        .setY(camera.position.y - 0.4);
+      sharkEvent.sharkExitPos.copy(camera.position)
+        .add(forward.clone().multiplyScalar(8))
+        .add(UP.clone().multiplyScalar(7));
+
+      sharkEvent.lineupFrom.copy(shark.position);
+      sharkEvent.lineupTarget.copy(sharkEvent.sharkMidPos);
+
+      scene.add(shark);
+      if (spawnSharkBtn) spawnSharkBtn.disabled = true;
+      if (fadeOverlay) fadeOverlay.style.opacity = '0';
+    }
+
+    function resetAfterShark(now){
+      if (sharkEvent.shark){
+        scene.remove(sharkEvent.shark);
+        sharkEvent.shark = null;
+      }
+      sharkEvent.active = false;
+      sharkEvent.stage = 'idle';
+      sharkEvent.start = sharkEvent.attackStart = sharkEvent.consumeStart = 0;
+      sharkEvent.lineupStartTime = 0;
+      sharkEvent.orbitStart = 0;
+      sharkEvent.lastForward.set(0,0,0);
+
+      const restorePhase = sharkEvent.prevPhase || 'stop';
+      phase = restorePhase === 'shark' ? 'stop' : restorePhase;
+      wpIndex = Number.isFinite(sharkEvent.prevWpIndex) ? sharkEvent.prevWpIndex : 0;
+      phaseStart = sharkEvent.prevPhaseStart || now;
+      lastStopIndex = sharkEvent.prevLastStopIndex ?? -1;
+      last = now;
+
+      camera.position.copy(sharkEvent.originCameraPos);
+      camera.quaternion.copy(sharkEvent.originCameraQuat);
+      camera.updateMatrixWorld(true);
+
+      beamCone.material.opacity = 0.07;
+      if (fadeOverlay){
+        setTimeout(()=>{ fadeOverlay.style.opacity = '0'; }, 400);
+      }
+      if (spawnSharkBtn) spawnSharkBtn.disabled = false;
+      resetSharkCharge();
+    }
+
+    function updateSharkEvent(now, dt){
+      if (!sharkEvent.active) return;
+      const shark = sharkEvent.shark;
+
+      // >>> mixer update voor GLB-animaties
+      if (shark?.userData?.mixer) shark.userData.mixer.update(dt);
+
+      const forward = sharkEvent.lastForward.lengthSq() ? sharkEvent.lastForward.clone() : new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion).normalize();
+      const lateral = forward.clone().cross(UP).normalize();
+      if (!Number.isFinite(lateral.x)) lateral.set(1,0,0);
+
+      if (shark) animateSharkBody(shark, now);
+
+      if (sharkEvent.stage === 'orbit'){
+        const orbitElapsed = now - sharkEvent.orbitStart;
+        const progress = Math.min(1, orbitElapsed / SHARK_TIMING.orbit);
+        const angle = progress * Math.PI * 2 * SHARK_ORBIT.turns;
+        const radius = SHARK_ORBIT.radius * (0.85 + 0.15*Math.cos(Math.min(angle, Math.PI*2)));
+        const lift = Math.sin(angle * 0.35) * SHARK_ORBIT.verticalSwing;
+        const orbitPos = sharkEvent.orbitCenter.clone()
+          .add(sharkEvent.orbitRight.clone().multiplyScalar(Math.cos(angle) * radius))
+          .add(sharkEvent.orbitForward.clone().multiplyScalar(Math.sin(angle) * radius))
+          .add(UP.clone().multiplyScalar(lift));
+        const tangent = sharkEvent.orbitRight.clone().multiplyScalar(-Math.sin(angle))
+          .add(sharkEvent.orbitForward.clone().multiplyScalar(Math.cos(angle)))
+          .normalize();
+        if (shark){
+          shark.position.copy(orbitPos);
+          tmpMatrix.lookAt(shark.position, tmpVecC.copy(shark.position).add(tangent), UP);
+          shark.quaternion.setFromRotationMatrix(tmpMatrix);
+          shark.quaternion.multiply(SHARK_FLIP_QUAT);
+          if (shark.userData) shark.userData.jawExtraOpen = 0.18 + progress*0.12;
+        }
+
+        camera.position.lerpVectors(sharkEvent.originCameraPos, sharkEvent.dodgeTarget, progress*0.55);
+        camera.lookAt(shark ? shark.position : sharkEvent.orbitCenter);
+        beamCone.material.opacity = 0.05 + 0.01*Math.sin(now*0.0012);
+
+        if (progress >= 1){
+          sharkEvent.stage = 'lineup';
+          sharkEvent.lineupStartTime = now;
+          sharkEvent.lineupFrom.copy(shark ? shark.position : orbitPos);
+          sharkEvent.lineupTarget.copy(sharkEvent.orbitCenter)
+            .add(forward.clone().multiplyScalar(36))
+            .add(sharkEvent.orbitRight.clone().multiplyScalar(Math.random() < 0.5 ? 4 : -4))
+            .add(UP.clone().multiplyScalar(-3.8));
+          sharkEvent.sharkMidPos.copy(sharkEvent.lineupTarget);
+          sharkEvent.attackStart = 0;
+        }
+        return;
+      }
+
+      if (sharkEvent.stage === 'lineup'){
+        const lineupElapsed = now - sharkEvent.lineupStartTime;
+        const t = Math.min(1, lineupElapsed / SHARK_TIMING.lineup);
+        const ease = t*t;
+        if (shark){
+          const pos = tmpVecC.copy(sharkEvent.lineupFrom).lerp(sharkEvent.lineupTarget, ease);
+          shark.position.copy(pos);
+          tmpMatrix.lookAt(shark.position, sharkEvent.lineupTarget, UP);
+          shark.quaternion.setFromRotationMatrix(tmpMatrix);
+          shark.quaternion.multiply(SHARK_FLIP_QUAT);
+          if (shark.userData) shark.userData.jawExtraOpen = 0.25 + ease*0.3;
+        }
+
+        camera.position.lerpVectors(sharkEvent.originCameraPos, sharkEvent.dodgeTarget, ease * 0.85);
+        if (shark) {
+          camera.lookAt(shark.position);
+        } else {
+          camera.lookAt(sharkEvent.lineupTarget);
+        }
+        beamCone.material.opacity = 0.048 + 0.01*Math.sin(now*0.0018);
+
+        if (t >= 1){
+          sharkEvent.sharkMidPos.copy(sharkEvent.lineupTarget);
+          sharkEvent.stage = 'attack';
+          sharkEvent.attackStart = now;
+        }
+        return;
+      }
+
+      if (sharkEvent.stage === 'attack'){
+        const attackElapsed = now - sharkEvent.attackStart;
+        const t = Math.min(1, attackElapsed / SHARK_TIMING.attack);
+        const ease = t*t;
+        const attackPath = tmpVecC.copy(sharkEvent.sharkMidPos).lerp(sharkEvent.sharkAttackPos, ease);
+        if (shark){
+          shark.position.copy(attackPath);
+          tmpMatrix.lookAt(shark.position, camera.position, UP);
+          shark.quaternion.setFromRotationMatrix(tmpMatrix);
+          shark.quaternion.multiply(SHARK_FLIP_QUAT);
+          if (shark.userData) shark.userData.jawExtraOpen = 0.45 + ease*0.45;
+        }
+
+        const pullTarget = tmpVecD.copy(sharkEvent.sharkAttackPos).add(UP.clone().multiplyScalar(2.6));
+        camera.position.lerpVectors(sharkEvent.dodgeTarget, pullTarget, ease);
+        camera.lookAt(shark ? shark.position : pullTarget);
+
+        beamCone.material.opacity = 0.03 + 0.01*Math.sin(now*0.0023);
+
+        const contactDistance = shark ? shark.position.distanceTo(camera.position) : Infinity;
+        if (contactDistance <= SHARK_CONTACT_DISTANCE){
+          sharkEvent.stage = 'consume';
+          sharkEvent.consumeStart = now;
+          if (fadeOverlay) fadeOverlay.style.opacity = '1';
+          beamCone.material.opacity = 0.0;
+          return;
+        }
+
+        if (t >= 1){
+          sharkEvent.stage = 'consume';
+          sharkEvent.consumeStart = now;
+          if (fadeOverlay) fadeOverlay.style.opacity = '1';
+        }
+        return;
+      }
+
+      if (sharkEvent.stage === 'consume'){
+        const consumeElapsed = now - sharkEvent.consumeStart;
+        if (shark){
+          shark.position.lerp(sharkEvent.sharkAttackPos, 0.2);
+          if (shark.userData) shark.userData.jawExtraOpen = 0.7;
+          tmpMatrix.lookAt(shark.position, camera.position, UP);
+          shark.quaternion.setFromRotationMatrix(tmpMatrix);
+          shark.quaternion.multiply(SHARK_FLIP_QUAT);
+        }
+        camera.position.lerp(sharkEvent.dodgeTarget, 0.08);
+        if (fadeOverlay) fadeOverlay.style.opacity = '1';
+        beamCone.material.opacity = 0.0;
+      if (consumeElapsed >= SHARK_TIMING.consume){
+        resetAfterShark(now);
+      }
+    }
+
+      sharkEvent.lastForward.copy(tmpVecD.set(0,0,-1).applyQuaternion(camera.quaternion).normalize());
+    }
+
+    // ======= NAVIGATIE (BEGIN = EIND, lus) =======
+    let wpIndex = 0;
+    let phase = 'stop'; // start bij rots 0
+    let phaseStart = performance.now();
+
+    function smoothstep(x){ return x*x*(3 - 2*x); }
+
+    function updateNavigation(now){
+      if (phase === 'shark') return;
+
+      const elapsed = now - phaseStart;
+
+      if (phase === 'stop'){
+        const targetRock = rocks[wpIndex];
+        const texPos = targetRock.userData.text.position;
+        const dir = texPos.clone().sub(camera.position).normalize();
+        const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+        const newFwd = fwd.lerp(dir, 0.2).normalize();
+        camera.lookAt(camera.position.clone().add(newFwd));
+
+        const baseWp = waypoints[wpIndex];
+        const outward = (targetRock.userData.outward || new THREE.Vector3(0,0,-1)).clone();
+        const idlePhase = now*0.0016;
+        const lateral = outward.clone().cross(UP).normalize();
+        if (!Number.isFinite(lateral.x)) lateral.set(1,0,0);
+        const idleOffset = lateral.multiplyScalar(Math.sin(idlePhase) * 0.45)
+          .add(UP.clone().multiplyScalar(Math.cos(idlePhase*0.8) * 0.28));
+        const hoverTarget = baseWp.clone().add(idleOffset);
+        camera.position.lerp(hoverTarget, 0.12);
+
+        if (elapsed >= STOP_TIME){
+          phase = 'swim';
+          phaseStart = now;
+          wpIndex = (wpIndex + 1) % waypoints.length;
+        }
+        return;
+      }
+
+      // phase === 'swim'
+      const from = waypoints[(wpIndex - 1 + waypoints.length) % waypoints.length];
+      const to = waypoints[wpIndex];
+      const t = Math.min(1, elapsed / SWIM_TIME);
+      const k = smoothstep(t);
+
+      const pos = new THREE.Vector3().copy(from).lerp(to, k);
+      const prevRock = rocks[(wpIndex - 1 + rocks.length) % rocks.length];
+      const nextRock = rocks[wpIndex];
+      const prevOut = (prevRock.userData.outward || new THREE.Vector3(0,0,-1)).clone();
+      const nextOut = (nextRock.userData.outward || prevOut).clone();
+      const mixOutward = prevOut.lerp(nextOut, k).normalize();
+      const arcOffset = mixOutward.clone().cross(UP).normalize().multiplyScalar(Math.sin(k*Math.PI) * 1.9);
+      pos.add(arcOffset);
+
+      const time = now*0.001;
+      pos.y += Math.sin(time*2.2)*0.35 + Math.sin(k*Math.PI) * 0.6;
+
+      camera.position.lerp(pos, 0.88);
+      const look = rocks[wpIndex].userData.text.position;
+      const desire = look.clone().sub(camera.position).normalize();
+      const curFwd = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+      const newFwd = curFwd.lerp(desire, 0.12).normalize();
+      camera.lookAt(camera.position.clone().add(newFwd));
+
+      // volumetric cone zachtjes ademen
+      beamCone.material.opacity = 0.06 + 0.02*Math.sin(now*0.0012);
+
+      if (t >= 1){
+        phase = 'stop';
+        phaseStart = now;
+      }
+    }
+
+    // ======= GLOW & OPACITY VAN TEKST OP BASIS VAN LAMP =======
+    const tmp = new THREE.Vector3();
+    function updateTextGlow(dt){
+      const cam = camera.position;
+      const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+
+      for (const r of rocks){
+        const t = r.userData.text;
+        const toPanel = t.position.clone().sub(cam);
+        const dist = toPanel.length();
+        const ang = fwd.angleTo(toPanel.normalize());
+        const inCone = ang < LAMP.angle*1.05;
+
+        const target = (inCone && dist < PANEL_DIST_TRIGGER) ? 1.0
+                      : (phase==='stop' && rocks[wpIndex]===r) ? 0.6 : 0.06;
+
+        const k = 1 - Math.exp(-dt*5);
+        r.userData.glow += (target - r.userData.glow) * k;
+
+        t.material.opacity = 0.08 + 0.92 * r.userData.glow;
+        t.color = new THREE.Color(NAME_STYLE.color).multiplyScalar(0.8 + 0.4*r.userData.glow);
+        t.outlineColor = new THREE.Color(NAME_STYLE.outlineColor);
+        t.outlineOpacity = 0.75 + 0.25*r.userData.glow;
+
+        if (Array.isArray(r.userData.hieroglyphs)){
+          for (const glyph of r.userData.hieroglyphs){
+            const mat = glyph?.material;
+            if (!mat) continue;
+            const base = glyph.userData?.baseOpacity ?? HIERO_STYLE.baseOpacity;
+            const max = glyph.userData?.maxOpacity ?? HIERO_STYLE.glowOpacity;
+            mat.opacity = base + (max - base) * r.userData.glow;
+            mat.color.setHex(HIERO_STYLE.color);
+          }
+        }
+      }
+    }
+
+    // ======= BUBBLES ANIM =======
+    function updateBubbles(now, dt){
+      const pos = bubbles.geometry.attributes.position;
+      const scale = bubbles.geometry.attributes.scale;
+      const speed = bubbles.geometry.attributes.speed;
+      const basePositions = bubbles.userData.basePositions;
+      for (let i=0;i<pos.count;i++){
+        const idx = i*3;
+        const baseX = basePositions[idx];
+        const baseZ = basePositions[idx+2];
+        const sway = Math.sin(now*0.0009 + baseX*0.015 + baseZ*0.013 + i*0.37)*0.25;
+        pos.setX(i, baseX + sway*0.6);
+        pos.setZ(i, baseZ + Math.cos(now*0.0011 + i*0.42)*0.2);
+        let y = pos.getY(i) + dt * (0.45 + speed.getX(i)*0.9);
+        if (y > FLOOR_Y + 110) {
+          pos.setY(i, FLOOR_Y + 2 + Math.random()*4);
+          basePositions[idx] = (Math.random()-0.5)*240;
+          basePositions[idx+2] = (Math.random()-0.5)*240;
+          pos.setX(i, basePositions[idx]);
+          pos.setZ(i, basePositions[idx+2]);
+        } else {
+          pos.setY(i, y);
+        }
+      }
+      pos.needsUpdate = true;
+    }
+
+    // ======= CAUSTICS SCROLL =======
+    function updateCaustics(dt){
+      caustics.material.map.offset.x += dt*0.03;
+      caustics.material.map.offset.y += dt*0.02;
+      caustics.material.map.needsUpdate = true;
+    }
+
+    function updateCoral(now){
+      const time = now * 0.0013;
+      for (const mesh of coralAnimatedMeshes){
+        if (!mesh?.userData) continue;
+        const data = mesh.userData;
+        const sway = Math.sin(time + (data.swayPhase || 0)) * (data.swayAmp || 0.1);
+        mesh.rotation.x = (data.baseRotX || 0) + sway * 0.6;
+        mesh.rotation.z = (data.baseRotZ || 0) + sway;
+      }
+    }
+
+    function updateDiver(now){
+      if (!diverRig?.userData) return;
+      const { basePosition, baseRotation, swayOffset, arm, flashlight, strap } = diverRig.userData;
+      if (!basePosition || !baseRotation) return;
+
+      const swayPhase = now*0.00165 + (swayOffset || 0);
+      const bobPhase = now*0.00125 + (swayOffset || 0)*0.7;
+      const rollPhase = now*0.0014 + (swayOffset || 0)*1.3;
+
+      diverRig.position.set(
+        basePosition.x + Math.sin(swayPhase) * 0.32,
+        basePosition.y + Math.cos(bobPhase) * 0.24,
+        basePosition.z + Math.sin(bobPhase*0.9) * 0.14
+      );
+
+      diverRig.rotation.set(
+        baseRotation.x + Math.sin(bobPhase*1.05) * 0.11,
+        baseRotation.y + Math.sin(swayPhase*0.85) * 0.12,
+        baseRotation.z + Math.cos(rollPhase) * 0.09
+      );
+
+      if (arm){
+        const baseArm = arm.userData?.baseRotation || arm.rotation;
+        arm.rotation.x = (baseArm.x || 0) - 0.08 + Math.sin(bobPhase*1.4) * 0.14;
+        arm.rotation.z = (baseArm.z || 0) + Math.sin(swayPhase*1.2) * 0.08;
+      }
+
+      if (flashlight){
+        const baseRot = flashlight.userData?.baseRotation || flashlight.rotation;
+        flashlight.rotation.y = (baseRot.y || 0) + Math.sin(rollPhase) * 0.09;
+      }
+
+      if (strap){
+        const baseRot = strap.userData?.baseRotation || strap.rotation;
+        strap.rotation.y = (baseRot.y || 0) + Math.sin(now*0.003 + (swayOffset || 0)) * 0.18;
+      }
+    }
+
+    // ======= MAIN LOOP =======
+    let last = performance.now();
+    function tick(now){
+      const dt = Math.min(0.05, (now - last)/1000); last = now;
+
+      if (subQueue.length){
+        const free = rocks.find(r=>!r.userData.occupied);
+        if (free) assignNextFreeRock(subQueue.shift());
+      }
+
+      if (sharkEvent.active){
+        updateSharkEvent(now, dt);
+      } else {
+        updateNavigation(now);
+      }
+      if (!sharkEvent.active && phase==='stop' && lastStopIndex !== wpIndex){
+        lastStopIndex = wpIndex;
+        if (!ambience.paused) { try{ ping.currentTime = 0; ping.play(); }catch(e){} }
+      }
+
+      updateTextGlow(dt);
+      updateBubbles(now, dt);
+      updateCaustics(dt);
+      updateDiver(now);
+      updateCoral(now);
+      updateRoamingSharks(now, dt);
+      updateMistLayers(now);
+      updateLightColumns(now);
+      animateFloor(now*0.001);
+      skyDome.rotation.y += dt * 0.005;
+
+      // micro-schommel op de camera
+      camera.rotation.z += Math.sin(now*0.0017)*CAMERA_BOB.z;
+      camera.rotation.x += Math.sin(now*0.0011)*CAMERA_BOB.x;
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    // ======= DEMO (kan uit) =======
+    const DEMO = false;
+    if (DEMO){
+      setInterval(()=> pushSubscriber("Gast"+Math.floor(Math.random()*999)), 5000);
+    }
+
+    // ======= RESIZE (optioneel vaste resolutie voor OBS) =======
+    window.addEventListener('resize', () => {
+      renderer.setSize(W, H, false);
+      camera.aspect = W/H;
+      camera.updateProjectionMatrix();
+    });
+  </script>
+</body>
+</html>

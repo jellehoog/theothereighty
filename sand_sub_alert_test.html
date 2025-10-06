@@ -1298,7 +1298,16 @@
         spawnAmbientShark(sharkOrigin, sharkRadius);
       }
 
-      rock.userData = { text, glow:0, occupied:true, name, outward: surfaceNormal.clone(), hieroglyphs, coral: coralCluster };
+      rock.userData = {
+        text,
+        glow: 0,
+        occupied: false,
+        name,
+        lastUsed: 0,
+        outward: surfaceNormal.clone(),
+        hieroglyphs,
+        coral: coralCluster
+      };
       rocks.push(rock);
 
       // waypoint: plek waar camera stopt (met goed zicht op tekst)
@@ -1310,25 +1319,96 @@
 
     // ======= SUB QUEUE =======
     const subQueue = [];
+    const SUBS_PER_FRAME = 3;
+
+    function normalizeName(name){
+      const base = name == null ? 'Friend' : name;
+      const str = String(base).trim();
+      return str.length ? str : 'Friend';
+    }
+
     window.pushSubscriber = function(name){
-      subQueue.push(String(name||'Friend'));
+      subQueue.push(normalizeName(name));
     };
+
     function assignNextFreeRock(name) {
+      if (!rocks.length) return false;
+      const normalized = normalizeName(name);
       let target = rocks.find(r => !r.userData.occupied);
       if (!target) {
-        target = rocks.reduce((a,b)=>(a.userData.lastUsed||0)<(b.userData.lastUsed||0)?a:b);
+        target = rocks.reduce((oldest, candidate) => {
+          const oldestTime = Number.isFinite(oldest.userData.lastUsed) ? oldest.userData.lastUsed : 0;
+          const candidateTime = Number.isFinite(candidate.userData.lastUsed) ? candidate.userData.lastUsed : 0;
+          return oldestTime <= candidateTime ? oldest : candidate;
+        });
       }
-      target.userData.occupied = true;
-      target.userData.name = name;
-      target.userData.lastUsed = performance.now();
+      if (!target) return false;
 
-      const t = target.userData.text;
-      if (Text) {
-        t.text = name;
-        t.sync();
-        t.material.opacity = 0.0; // fade in via lamp
+      target.userData.occupied = true;
+      target.userData.name = normalized;
+      target.userData.lastUsed = performance.now();
+      target.userData.glow = 0;
+
+      const textMesh = target.userData.text;
+      if (Text && textMesh) {
+        textMesh.text = normalized;
+        textMesh.sync();
+        if (textMesh.material) {
+          textMesh.material.opacity = 0.0;
+        }
+      }
+
+      if (textMesh && textMesh.userData) {
+        textMesh.userData.glow = 0;
+      }
+
+      return true;
+    }
+
+    window.assignNextFreeRock = assignNextFreeRock;
+
+    function processSubQueue(batchSize = SUBS_PER_FRAME){
+      let processed = 0;
+      while (processed < batchSize && subQueue.length){
+        const nextName = subQueue[0];
+        if (!assignNextFreeRock(nextName)) break;
+        subQueue.shift();
+        processed++;
       }
     }
+    const STREAM_ELEMENTS_LISTENERS = new Set(['subscriber-latest','follower-latest','member-latest','subscriber','follower','member']);
+
+    window.addEventListener('onWidgetLoad', (obj) => {
+      try {
+        const detail = obj?.detail || {};
+        const fieldData = detail.fieldData || {};
+        const limitRaw = Number(fieldData.limitDisplayedEvents);
+        const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? limitRaw : rocks.length;
+        const recents = detail.recents || {};
+        const candidateLists = [recents.subscribers, recents.followers, recents.members];
+        const firstList = candidateLists.find(Array.isArray) || [];
+        firstList.slice(0, limit).reverse().forEach(user => {
+          const name = user?.name ?? user?.displayName ?? user?.username ?? 'Friend';
+          window.pushSubscriber(name);
+        });
+      } catch (err) {
+        console.warn('onWidgetLoad parse error', err);
+      }
+    });
+
+    window.addEventListener('onEventReceived', (obj) => {
+      try {
+        const detail = obj?.detail || {};
+        const listener = detail.listener;
+        const event = detail.event || {};
+        if (!listener || !STREAM_ELEMENTS_LISTENERS.has(listener)) return;
+        const name = event.name ?? event.displayName ?? event.username ?? event.sender ?? 'Friend';
+        window.pushSubscriber(name);
+      } catch (err) {
+        console.warn('onEventReceived handler error', err);
+      }
+    });
+
 
     // ======= HAAI SEQUENCE =======
     const ambience = document.getElementById('ambience');
@@ -1860,8 +1940,7 @@
       const dt = Math.min(0.05, (now - last)/1000); last = now;
 
       if (subQueue.length){
-        const free = rocks.find(r=>!r.userData.occupied);
-        if (free) assignNextFreeRock(subQueue.shift());
+        processSubQueue();
       }
 
       if (sharkEvent.active){
